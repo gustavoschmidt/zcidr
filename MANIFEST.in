@@ -1,0 +1,7 @@
+# Include the Zig sources so an sdist can build the native core.
+include build.zig build.zig.zon
+include README.md LICENSE
+recursive-include src *.zig
+recursive-include include *.h
+recursive-include tests *.py
+recursive-include benchmarks *.py *.md

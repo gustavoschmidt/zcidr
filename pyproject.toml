@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=64", "ziglang==0.16.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "znetaddress"
+version = "0.0.1"
+description = "Fast IP / CIDR toolkit backed by a native Zig core"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "znetaddress contributors" }]
+keywords = ["ip", "ipv4", "ipv6", "cidr", "netaddr", "ipaddress", "trie", "zig"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Zig",
+    "Topic :: System :: Networking",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
+dependencies = ["cffi>=1.15"]
+
+[project.urls]
+Homepage = "https://github.com/znetaddress/znetaddress"
+
+[project.optional-dependencies]
+test = ["pytest"]
+bench = ["netaddr"]
+
+[tool.setuptools]
+packages = ["znetaddress"]
+
+[tool.setuptools.package-data]
+znetaddress = ["*.so", "*.dylib", "*.dll"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# --- Wheel building -------------------------------------------------------
+[tool.cibuildwheel]
+# The native toolchain comes from the `ziglang` build requirement, so nothing
+# extra needs installing in the build container. Our wheels are tagged
+# py3-none-<platform> (ABI-independent cffi/dlopen), so one build per platform
+# is enough — restrict to a single interpreter.
+build = "cp312-*"
+build-frontend = "build"
+test-requires = ["pytest", "netaddr"]
+test-command = "pytest {project}/tests -q"
+
+[tool.cibuildwheel.linux]
+# manylinux containers ship an old glibc, so a native ReleaseFast build is
+# broadly compatible; auditwheel (run by cibuildwheel) repairs the wheel.
+archs = ["x86_64", "aarch64"]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
