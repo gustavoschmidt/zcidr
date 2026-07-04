@@ -10,6 +10,7 @@ const builtin = @import("builtin");
 /// Submodules. Importing them here compiles their `export fn`s into the shared
 /// library and pulls their tests into `zig build test`.
 pub const ipv4 = @import("ipv4.zig");
+pub const ipv6 = @import("ipv6.zig");
 
 /// Semantic version of the library, packed as (major << 16) | (minor << 8) | patch.
 pub const version = struct {
@@ -32,4 +33,5 @@ test "znet_version packs semver" {
 test {
     std.testing.refAllDecls(@This());
     _ = ipv4;
+    _ = ipv6;
 }
