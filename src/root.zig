@@ -11,6 +11,8 @@ const builtin = @import("builtin");
 /// library and pulls their tests into `zig build test`.
 pub const ipv4 = @import("ipv4.zig");
 pub const ipv6 = @import("ipv6.zig");
+pub const cidr = @import("cidr.zig");
+pub const trie = @import("trie.zig");
 
 /// Semantic version of the library, packed as (major << 16) | (minor << 8) | patch.
 pub const version = struct {
@@ -25,6 +27,15 @@ export fn znet_version() u32 {
     return (version.major << 16) | (version.minor << 8) | version.patch;
 }
 
+// Force the submodules to be analyzed so their `export fn`s are emitted into
+// the shared library (importing a file alone does not pull in its exports).
+comptime {
+    _ = ipv4;
+    _ = ipv6;
+    _ = cidr;
+    _ = trie;
+}
+
 test "znet_version packs semver" {
     try std.testing.expectEqual(@as(u32, 0x000100), znet_version());
 }
@@ -34,4 +45,6 @@ test {
     std.testing.refAllDecls(@This());
     _ = ipv4;
     _ = ipv6;
+    _ = cidr;
+    _ = trie;
 }
