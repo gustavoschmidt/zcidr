@@ -1,0 +1,12 @@
+.{
+    .name = .znetaddress,
+    .version = "0.0.1",
+    .fingerprint = 0x16e864267ffda7fb,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "include",
+    },
+}
