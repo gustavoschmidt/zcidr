@@ -1,4 +1,4 @@
-"""Low-level cffi (ABI/dlopen mode) binding to the znetaddress Zig core.
+"""Low-level cffi (ABI/dlopen mode) binding to the zcidr Zig core.
 
 We declare the stable C ABI with ``ffi.cdef`` and ``dlopen`` the prebuilt
 shared library — no compiler is needed at import/install time. The shared
@@ -13,28 +13,42 @@ import sys
 
 from cffi import FFI
 
-# Keep this in sync with include/znetaddress.h.
+# Keep this in sync with include/zcidr.h.
 _CDEF = """
-uint32_t znet_version(void);
+uint32_t zcidr_version(void);
 
-int znet_ipv4_parse(const uint8_t *s, size_t len, uint32_t *out);
-intptr_t znet_ipv4_format(uint32_t addr, uint8_t *buf, size_t buflen);
+int zcidr_ipv4_parse(const uint8_t *s, size_t len, uint32_t *out);
+intptr_t zcidr_ipv4_format(uint32_t addr, uint8_t *buf, size_t buflen);
+intptr_t zcidr_ipv4_parse_lines(const uint8_t *data, size_t len,
+                                uint32_t *out_values, uint8_t *out_valid,
+                                size_t cap);
+intptr_t zcidr_ipv4_format_lines(const uint32_t *values, size_t n,
+                                 uint8_t *out, size_t cap);
 
-int znet_ipv6_parse(const uint8_t *s, size_t len, uint8_t *out);
-intptr_t znet_ipv6_format(const uint8_t *in, uint8_t *buf, size_t buflen);
+int zcidr_ipv6_parse(const uint8_t *s, size_t len, uint8_t *out);
+intptr_t zcidr_ipv6_format(const uint8_t *in, uint8_t *buf, size_t buflen);
+intptr_t zcidr_ipv6_parse_lines(const uint8_t *data, size_t len,
+                                uint8_t *out_bytes, uint8_t *out_valid,
+                                size_t cap);
+intptr_t zcidr_ipv6_format_lines(const uint8_t *bytes, size_t n,
+                                 uint8_t *out, size_t cap);
 
-int znet_cidr_parse(const uint8_t *s, size_t len, int *is_v6,
-                    uint8_t *out_bytes, uint8_t *out_prefix);
+int zcidr_cidr_parse(const uint8_t *s, size_t len, int *is_v6,
+                     uint8_t *out_bytes, uint8_t *out_prefix);
 
-typedef struct znet_trie znet_trie;
-znet_trie *znet_trie_create(void);
-void znet_trie_destroy(znet_trie *t);
-int znet_trie_insert(znet_trie *t, int is_v6, const uint8_t *addr,
-                     uint8_t prefix_len, uint64_t value);
-int znet_trie_insert_cidr(znet_trie *t, const uint8_t *s, size_t len,
-                          uint64_t value);
-int znet_trie_lookup(znet_trie *t, int is_v6, const uint8_t *addr,
-                     uint64_t *out_value);
+typedef struct zcidr_trie zcidr_trie;
+zcidr_trie *zcidr_trie_create(void);
+void zcidr_trie_destroy(zcidr_trie *t);
+int zcidr_trie_insert(zcidr_trie *t, int is_v6, const uint8_t *addr,
+                      uint8_t prefix_len, uint64_t value);
+int zcidr_trie_insert_cidr(zcidr_trie *t, const uint8_t *s, size_t len,
+                           uint64_t value);
+int zcidr_trie_lookup(zcidr_trie *t, int is_v6, const uint8_t *addr,
+                      uint64_t *out_value);
+int zcidr_trie_lookup_v4_many(zcidr_trie *t, const uint32_t *keys, size_t n,
+                              uint64_t *out_values, uint8_t *out_found);
+int zcidr_trie_lookup_v6_many(zcidr_trie *t, const uint8_t *keys, size_t n,
+                              uint64_t *out_values, uint8_t *out_found);
 """
 
 # Status codes (mirror src/abi.zig).
@@ -47,10 +61,10 @@ ERR_NOTFOUND = -4
 
 def _lib_filenames() -> list[str]:
     if sys.platform == "darwin":
-        return ["libznetaddress.dylib"]
+        return ["libzcidr.dylib"]
     if sys.platform == "win32":
-        return ["znetaddress.dll", "libznetaddress.dll"]
-    return ["libznetaddress.so"]
+        return ["zcidr.dll", "libzcidr.dll"]
+    return ["libzcidr.so"]
 
 
 def _find_library() -> str:
@@ -60,7 +74,7 @@ def _find_library() -> str:
         here,  # bundled inside the installed package
         os.path.join(repo_root, "zig-out", "lib"),  # local `zig build`
     ]
-    env = os.environ.get("ZNETADDRESS_LIB")
+    env = os.environ.get("ZCIDR_LIB")
     if env:
         if os.path.isfile(env):
             return env
@@ -71,8 +85,8 @@ def _find_library() -> str:
             if os.path.isfile(candidate):
                 return candidate
     raise OSError(
-        "Could not locate the znetaddress shared library. Build it with "
-        "`zig build`, or set ZNETADDRESS_LIB to its path. Searched: "
+        "Could not locate the zcidr shared library. Build it with "
+        "`zig build`, or set ZCIDR_LIB to its path. Searched: "
         + ", ".join(search_dirs)
     )
 

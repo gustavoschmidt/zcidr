@@ -1,4 +1,4 @@
-"""Benchmark znetaddress against the stdlib ``ipaddress`` and ``netaddr``.
+"""Benchmark zcidr against the stdlib ``ipaddress`` and ``netaddr``.
 
 Run with an optimized native core for a fair comparison::
 
@@ -20,7 +20,7 @@ from time import perf_counter
 # Allow running as a plain script (`python benchmarks/bench.py`) from a checkout.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import znetaddress as z  # noqa: E402
+import zcidr as z  # noqa: E402
 
 try:
     import netaddr
@@ -68,13 +68,16 @@ def _random_cidrs(k, rng, version=4):
 def bench_ipv4_parse(n=200_000, seed=1):
     rng = random.Random(seed)
     data = _ipv4_strings(n, rng)
+    blob = "\n".join(data).encode()
     results = {
-        "znetaddress": _rate(lambda w: [z.parse_ipv4(s) for s in w], data),
+        "zcidr (scalar)": _rate(lambda w: [z.parse_ipv4(s) for s in w], data),
         "ipaddress": _rate(lambda w: [int(ipaddress.IPv4Address(s)) for s in w], data),
     }
+    t0 = perf_counter()
+    z.parse_ipv4_lines(blob)
+    results["zcidr (batch lines)"] = n / (perf_counter() - t0)
     if HAVE_NETADDR:
         results["netaddr"] = _rate(lambda w: [int(netaddr.IPAddress(s)) for s in w], data)
-    # correctness spot-check
     assert z.parse_ipv4(data[0]) == int(ipaddress.IPv4Address(data[0]))
     return results
 
@@ -82,10 +85,14 @@ def bench_ipv4_parse(n=200_000, seed=1):
 def bench_ipv6_parse(n=200_000, seed=2):
     rng = random.Random(seed)
     data = _ipv6_strings(n, rng)
+    blob = "\n".join(data).encode()
     results = {
-        "znetaddress": _rate(lambda w: [z.parse_ipv6(s) for s in w], data),
+        "zcidr (scalar)": _rate(lambda w: [z.parse_ipv6(s) for s in w], data),
         "ipaddress": _rate(lambda w: [ipaddress.IPv6Address(s).packed for s in w], data),
     }
+    t0 = perf_counter()
+    z.parse_ipv6_lines(blob)
+    results["zcidr (batch lines)"] = n / (perf_counter() - t0)
     if HAVE_NETADDR:
         results["netaddr"] = _rate(lambda w: [netaddr.IPAddress(s).packed for s in w], data)
     assert z.parse_ipv6(data[0]) == ipaddress.IPv6Address(data[0]).packed
@@ -99,10 +106,18 @@ def bench_membership(k=2_000, m=100_000, seed=3):
     cidrs = [str(n) for n in nets]
     queries = _ipv4_strings(m, rng)
 
-    zset = z.PrefixSet(cidrs)
+    matcher = z.build(cidrs)
 
-    def znet_run(w):
-        return [ip in zset for ip in w]
+    def znet_scalar(w):
+        return [z.contains(matcher, ip) for ip in w]
+
+    # batch path: parse once, look up once
+    query_blob = "\n".join(queries).encode()
+
+    def znet_batch(_w):
+        keys, _ = z.parse_ipv4_lines(query_blob)
+        _values, found = z.match_ipv4_many(matcher, keys)
+        return found
 
     py_nets = [ipaddress.ip_network(c) for c in cidrs]
 
@@ -113,7 +128,10 @@ def bench_membership(k=2_000, m=100_000, seed=3):
             out.append(any(addr in net for net in py_nets))
         return out
 
-    results = {"znetaddress": _rate(znet_run, queries)}
+    results = {
+        "zcidr (scalar)": _rate(znet_scalar, queries),
+        "zcidr (batch)": _rate(znet_batch, queries),
+    }
     if HAVE_NETADDR:
         na_set = netaddr.IPSet(cidrs)
 
@@ -126,10 +144,12 @@ def bench_membership(k=2_000, m=100_000, seed=3):
     sample = queries[: min(len(queries), 2_000)]
     results["ipaddress (linear scan)"] = _rate(ipaddress_run, sample)
 
-    # correctness: znetaddress agrees with the linear scan on the sample
-    zr = znet_run(sample)
-    ir = ipaddress_run(sample)
-    assert zr == ir
+    # correctness: batch, scalar, and the linear scan agree on the sample
+    scan = ipaddress_run(sample)
+    assert znet_scalar(sample) == scan
+    keys, _ = z.parse_ipv4_lines("\n".join(sample))
+    _v, found = z.match_ipv4_many(matcher, keys)
+    assert [bool(b) for b in found] == scan
     return results
 
 
@@ -138,12 +158,12 @@ def _print_table(title, results):
     print(f"\n{title}")
     print("-" * len(title))
     for impl, rate in sorted(results.items(), key=lambda kv: -kv[1]):
-        speedup = f"{rate / baseline:6.1f}x" if baseline else "   -  "
+        speedup = f"{rate / baseline:7.1f}x" if baseline else "   -  "
         print(f"  {impl:26} {rate:14,.0f} ops/s  {speedup}")
 
 
 def main():
-    print(f"znetaddress {z.__version__}  (native core {'.'.join(map(str, z.version()))})")
+    print(f"zcidr {z.__version__}  (native core {'.'.join(map(str, z.version()))})")
     print(f"netaddr available: {HAVE_NETADDR}")
     _print_table("IPv4 parse", bench_ipv4_parse())
     _print_table("IPv6 parse", bench_ipv6_parse())

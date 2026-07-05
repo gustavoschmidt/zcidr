@@ -3,14 +3,14 @@ requires = ["setuptools>=64", "ziglang==0.16.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "znetaddress"
+name = "zcidr"
 version = "0.0.1"
-description = "Fast IP / CIDR toolkit backed by a native Zig core"
+description = "Fast, functional IP / CIDR toolkit backed by a native Zig core"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
-authors = [{ name = "znetaddress contributors" }]
-keywords = ["ip", "ipv4", "ipv6", "cidr", "netaddr", "ipaddress", "trie", "zig"]
+authors = [{ name = "zcidr contributors" }]
+keywords = ["ip", "ipv4", "ipv6", "cidr", "longest-prefix-match", "trie", "zig"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Zig",
@@ -23,17 +23,17 @@ classifiers = [
 dependencies = ["cffi>=1.15"]
 
 [project.urls]
-Homepage = "https://github.com/znetaddress/znetaddress"
+Homepage = "https://github.com/zcidr/zcidr"
 
 [project.optional-dependencies]
 test = ["pytest"]
 bench = ["netaddr"]
 
 [tool.setuptools]
-packages = ["znetaddress"]
+packages = ["zcidr"]
 
 [tool.setuptools.package-data]
-znetaddress = ["*.so", "*.dylib", "*.dll"]
+zcidr = ["*.so", "*.dylib", "*.dll"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

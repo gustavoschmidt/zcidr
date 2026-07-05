@@ -10,8 +10,8 @@ import os
 
 import pytest
 
-import znetaddress as z
-from znetaddress import _core
+import zcidr as z
+from zcidr import _core
 
 try:
     import tomllib
@@ -43,7 +43,7 @@ def test_pyproject_build_config():
     assert any(r.startswith("ziglang") for r in build["requires"])
 
     project = cfg["project"]
-    assert project["name"] == "znetaddress"
+    assert project["name"] == "zcidr"
     assert any(d.startswith("cffi") for d in project["dependencies"])
 
     # cibuildwheel must run the test suite against each built wheel.

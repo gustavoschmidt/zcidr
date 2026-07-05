@@ -27,11 +27,11 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 def _lib_name() -> str:
     if sys.platform.startswith("linux"):
-        return "libznetaddress.so"
+        return "libzcidr.so"
     if sys.platform == "darwin":
-        return "libznetaddress.dylib"
+        return "libzcidr.dylib"
     if sys.platform in ("win32", "cygwin"):
-        return "znetaddress.dll"
+        return "zcidr.dll"
     raise RuntimeError(f"unsupported platform: {sys.platform}")
 
 
@@ -50,10 +50,10 @@ class BuildZig(build_py):
 
     def run(self) -> None:
         cmd = _zig_cmd() + ["build", "-Doptimize=ReleaseFast"]
-        target = os.environ.get("ZNET_ZIG_TARGET")
+        target = os.environ.get("ZCIDR_ZIG_TARGET")
         if target:  # e.g. cross-building manylinux: x86_64-linux-gnu.2.17
             cmd.append(f"-Dtarget={target}")
-        print("znetaddress: building native core:", " ".join(cmd))
+        print("zcidr: building native core:", " ".join(cmd))
         subprocess.check_call(cmd, cwd=ROOT)
 
         super().run()  # copies the .py sources into build_lib
@@ -62,10 +62,10 @@ class BuildZig(build_py):
         src = os.path.join(ROOT, "zig-out", "lib", lib)
         if not os.path.isfile(src):
             raise RuntimeError(f"expected built library not found: {src}")
-        dest_dir = os.path.join(self.build_lib, "znetaddress")
+        dest_dir = os.path.join(self.build_lib, "zcidr")
         os.makedirs(dest_dir, exist_ok=True)
         shutil.copy2(src, os.path.join(dest_dir, lib))
-        print(f"znetaddress: bundled {lib} into {dest_dir}")
+        print(f"zcidr: bundled {lib} into {dest_dir}")
 
 
 class WheelABINone(bdist_wheel):

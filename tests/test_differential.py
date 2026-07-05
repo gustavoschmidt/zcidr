@@ -7,7 +7,7 @@ native results must agree with Python's reference implementation.
 import ipaddress
 import random
 
-import znetaddress as z
+import zcidr as z
 
 SEED = 20260704
 
@@ -57,17 +57,14 @@ def test_trie_matches_reference_ipv4():
         base = rng.getrandbits(32)
         net = ipaddress.ip_network((base, prefix), strict=False)
         nets[str(net)] = None
-    ordered = []
-    m = z.PrefixMap()
-    for i, cidr in enumerate(nets):
-        val = i + 1
-        m.add(cidr, val)
-        ordered.append((ipaddress.ip_network(cidr), val))
+    cidrs = list(nets)
+    values = [i + 1 for i in range(len(cidrs))]
+    ordered = [(ipaddress.ip_network(c), v) for c, v in zip(cidrs, values)]
+    m = z.build(cidrs, values)
 
     for _ in range(5000):
         ip = str(ipaddress.IPv4Address(rng.getrandbits(32)))
-        assert m.get(ip) == _ref_lookup(ordered, ip)
-    m.close()
+        assert z.match(m, ip) == _ref_lookup(ordered, ip)
 
 
 def test_trie_matches_reference_ipv6():
@@ -78,14 +75,35 @@ def test_trie_matches_reference_ipv6():
         base = rng.getrandbits(128)
         net = ipaddress.ip_network((base, prefix), strict=False)
         nets[str(net)] = None
-    ordered = []
-    m = z.PrefixMap()
-    for i, cidr in enumerate(nets):
-        val = i + 1
-        m.add(cidr, val)
-        ordered.append((ipaddress.ip_network(cidr), val))
+    cidrs = list(nets)
+    values = [i + 1 for i in range(len(cidrs))]
+    ordered = [(ipaddress.ip_network(c), v) for c, v in zip(cidrs, values)]
+    m = z.build(cidrs, values)
 
     for _ in range(3000):
         ip = str(ipaddress.IPv6Address(rng.getrandbits(128)))
-        assert m.get(ip) == _ref_lookup(ordered, ip)
-    m.close()
+        assert z.match(m, ip) == _ref_lookup(ordered, ip)
+
+
+def test_batch_match_agrees_with_scalar_ipv4():
+    """The batch LPM path must agree with the scalar path element-for-element."""
+    rng = random.Random(SEED + 5)
+    cidrs = []
+    seen = set()
+    while len(cidrs) < 200:
+        net = ipaddress.ip_network((rng.getrandbits(32), rng.randint(0, 32)), strict=False)
+        if str(net) not in seen:
+            seen.add(str(net))
+            cidrs.append(str(net))
+    m = z.build(cidrs)  # default index values
+
+    ips = [str(ipaddress.IPv4Address(rng.getrandbits(32))) for _ in range(4000)]
+    keys, valid = z.parse_ipv4_lines("\n".join(ips))
+    assert all(valid)
+    values, found = z.match_ipv4_many(m, keys)
+    for i, ip in enumerate(ips):
+        scalar = z.match(m, ip)
+        if scalar is None:
+            assert found[i] == 0
+        else:
+            assert found[i] == 1 and values[i] == scalar

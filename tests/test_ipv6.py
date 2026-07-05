@@ -2,7 +2,7 @@ import ipaddress
 
 import pytest
 
-import znetaddress as z
+import zcidr as z
 
 
 def test_parse_roundtrip_bytes():
