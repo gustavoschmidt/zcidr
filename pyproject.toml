@@ -23,7 +23,7 @@ classifiers = [
 dependencies = ["cffi>=1.15"]
 
 [project.urls]
-Homepage = "https://github.com/zcidr/zcidr"
+Homepage = "https://github.com/gustavoschmidt/zcidr"
 
 [project.optional-dependencies]
 test = ["pytest"]
@@ -52,7 +52,9 @@ test-command = "pytest {project}/tests -q"
 [tool.cibuildwheel.linux]
 # manylinux containers ship an old glibc, so a native ReleaseFast build is
 # broadly compatible; auditwheel (run by cibuildwheel) repairs the wheel.
-archs = ["x86_64", "aarch64"]
+# Build only the runner's native arch — CI provides an x86_64 and an arm64
+# runner, which beats QEMU emulation for both build and test time.
+archs = ["auto64"]
 
 [tool.cibuildwheel.macos]
 archs = ["x86_64", "arm64"]
