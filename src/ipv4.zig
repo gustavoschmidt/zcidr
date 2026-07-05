@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const abi = @import("abi.zig");
+const lines = @import("lines.zig");
 
 pub const ParseError = error{Invalid};
 
@@ -93,7 +94,7 @@ fn writeByte(byte: u8, buf: []u8) error{Invalid}!usize {
 
 /// Parse dotted-decimal IPv4. On success writes the host-order value to `out`
 /// and returns `OK`; otherwise returns a negative status.
-export fn znet_ipv4_parse(s: [*]const u8, len: usize, out: *u32) c_int {
+export fn zcidr_ipv4_parse(s: [*]const u8, len: usize, out: *u32) c_int {
     const value = parse(s[0..len]) catch return abi.ERR_INVALID;
     out.* = value;
     return abi.OK;
@@ -101,14 +102,84 @@ export fn znet_ipv4_parse(s: [*]const u8, len: usize, out: *u32) c_int {
 
 /// Format a host-order IPv4 value into `buf` (no NUL terminator). Returns the
 /// number of bytes written, or a negative status if `buf` is too small.
-export fn znet_ipv4_format(addr: u32, buf: [*]u8, buflen: usize) isize {
+export fn zcidr_ipv4_format(addr: u32, buf: [*]u8, buflen: usize) isize {
     const written = format(addr, buf[0..buflen]) catch return abi.ERR_BUFFER;
     return @intCast(written.len);
+}
+
+/// Batch-parse newline-delimited IPv4 addresses. For each record, writes the
+/// host-order value to `out_values` and a validity byte (1/0) to `out_valid`.
+/// `cap` is the capacity of both output arrays. Returns the number of records,
+/// or `ERR_BUFFER` if the record count exceeds `cap`.
+export fn zcidr_ipv4_parse_lines(
+    data: [*]const u8,
+    len: usize,
+    out_values: [*]u32,
+    out_valid: [*]u8,
+    cap: usize,
+) isize {
+    var it = lines.LineIter.init(data[0..len]);
+    var count: usize = 0;
+    while (it.next()) |seg| {
+        if (count >= cap) return abi.ERR_BUFFER;
+        if (parse(seg)) |v| {
+            out_values[count] = v;
+            out_valid[count] = 1;
+        } else |_| {
+            out_values[count] = 0;
+            out_valid[count] = 0;
+        }
+        count += 1;
+    }
+    return @intCast(count);
+}
+
+/// Batch-format `n` host-order IPv4 values into `out` as newline-separated
+/// dotted-decimal (no trailing newline). Returns bytes written, or `ERR_BUFFER`.
+export fn zcidr_ipv4_format_lines(values: [*]const u32, n: usize, out: [*]u8, cap: usize) isize {
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (i != 0) {
+            if (pos >= cap) return abi.ERR_BUFFER;
+            out[pos] = '\n';
+            pos += 1;
+        }
+        const written = format(values[i], out[pos..cap]) catch return abi.ERR_BUFFER;
+        pos += written.len;
+    }
+    return @intCast(pos);
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "batch parse lines" {
+    var vals: [4]u32 = undefined;
+    var valid: [4]u8 = undefined;
+    const n = zcidr_ipv4_parse_lines("1.2.3.4\nbad\n255.255.255.255", 27, &vals, &valid, 4);
+    try std.testing.expectEqual(@as(isize, 3), n);
+    try std.testing.expectEqual(@as(u8, 1), valid[0]);
+    try std.testing.expectEqual(@as(u32, 0x01020304), vals[0]);
+    try std.testing.expectEqual(@as(u8, 0), valid[1]); // "bad"
+    try std.testing.expectEqual(@as(u8, 1), valid[2]);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), vals[2]);
+}
+
+test "batch parse respects cap" {
+    var vals: [1]u32 = undefined;
+    var valid: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, abi.ERR_BUFFER), zcidr_ipv4_parse_lines("1.1.1.1\n2.2.2.2", 15, &vals, &valid, 1));
+}
+
+test "batch format lines" {
+    const vals = [_]u32{ 0x01020304, 0x08080808 };
+    var buf: [64]u8 = undefined;
+    const n = zcidr_ipv4_format_lines(&vals, 2, &buf, buf.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expectEqualStrings("1.2.3.4\n8.8.8.8", buf[0..@intCast(n)]);
+}
 
 test "parse basic" {
     try std.testing.expectEqual(@as(u32, 0x01020304), try parse("1.2.3.4"));
@@ -169,13 +240,13 @@ test "format buffer too small" {
 
 test "abi round-trip" {
     var value: u32 = undefined;
-    try std.testing.expectEqual(abi.OK, znet_ipv4_parse("1.2.3.4", 7, &value));
+    try std.testing.expectEqual(abi.OK, zcidr_ipv4_parse("1.2.3.4", 7, &value));
     try std.testing.expectEqual(@as(u32, 0x01020304), value);
 
     var buf: [max_str_len]u8 = undefined;
-    const n = znet_ipv4_format(value, &buf, buf.len);
+    const n = zcidr_ipv4_format(value, &buf, buf.len);
     try std.testing.expect(n > 0);
     try std.testing.expectEqualStrings("1.2.3.4", buf[0..@intCast(n)]);
 
-    try std.testing.expectEqual(abi.ERR_INVALID, znet_ipv4_parse("bad", 3, &value));
+    try std.testing.expectEqual(abi.ERR_INVALID, zcidr_ipv4_parse("bad", 3, &value));
 }

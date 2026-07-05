@@ -64,7 +64,7 @@ pub fn parse(s: []const u8) ParseError!Cidr {
 
 /// Parse a CIDR string. On success sets `*is_v6` (0/1), writes up to 16
 /// network-order bytes to `out_bytes`, and `*out_prefix`.
-export fn znet_cidr_parse(
+export fn zcidr_cidr_parse(
     s: [*]const u8,
     len: usize,
     is_v6: *c_int,

@@ -94,21 +94,21 @@ pub const Trie = struct {
 // ---------------------------------------------------------------------------
 
 /// Allocate a trie (libc allocator). Returns null on failure. Free with
-/// znet_trie_destroy.
-export fn znet_trie_create() ?*Trie {
+/// zcidr_trie_destroy.
+export fn zcidr_trie_create() ?*Trie {
     const t = std.heap.c_allocator.create(Trie) catch return null;
     t.* = Trie.init(std.heap.c_allocator);
     return t;
 }
 
-export fn znet_trie_destroy(t: ?*Trie) void {
+export fn zcidr_trie_destroy(t: ?*Trie) void {
     const trie = t orelse return;
     trie.deinit();
     std.heap.c_allocator.destroy(trie);
 }
 
 /// Insert a prefix from raw bytes (4 bytes for IPv4, 16 for IPv6).
-export fn znet_trie_insert(t: ?*Trie, is_v6: c_int, addr: [*]const u8, prefix_len: u8, value: u64) c_int {
+export fn zcidr_trie_insert(t: ?*Trie, is_v6: c_int, addr: [*]const u8, prefix_len: u8, value: u64) c_int {
     const trie = t orelse return abi.ERR_INVALID;
     const v6 = is_v6 != 0;
     const nbytes: usize = if (v6) 16 else 4;
@@ -118,7 +118,7 @@ export fn znet_trie_insert(t: ?*Trie, is_v6: c_int, addr: [*]const u8, prefix_le
 }
 
 /// Insert a prefix from a CIDR string.
-export fn znet_trie_insert_cidr(t: ?*Trie, s: [*]const u8, len: usize, value: u64) c_int {
+export fn zcidr_trie_insert_cidr(t: ?*Trie, s: [*]const u8, len: usize, value: u64) c_int {
     const trie = t orelse return abi.ERR_INVALID;
     trie.insertCidr(s[0..len], value) catch |e| return switch (e) {
         error.Invalid => abi.ERR_INVALID,
@@ -129,7 +129,7 @@ export fn znet_trie_insert_cidr(t: ?*Trie, s: [*]const u8, len: usize, value: u6
 
 /// Longest-prefix-match lookup by raw bytes. On a hit writes the value to
 /// `out_value` and returns OK; on a miss returns ERR_NOTFOUND.
-export fn znet_trie_lookup(t: ?*Trie, is_v6: c_int, addr: [*]const u8, out_value: *u64) c_int {
+export fn zcidr_trie_lookup(t: ?*Trie, is_v6: c_int, addr: [*]const u8, out_value: *u64) c_int {
     const trie = t orelse return abi.ERR_INVALID;
     const v6 = is_v6 != 0;
     const nbytes: usize = if (v6) 16 else 4;
@@ -138,6 +138,55 @@ export fn znet_trie_lookup(t: ?*Trie, is_v6: c_int, addr: [*]const u8, out_value
         return abi.OK;
     }
     return abi.ERR_NOTFOUND;
+}
+
+/// Batch longest-prefix-match over `n` host-order IPv4 keys. Writes the matched
+/// value to `out_values[i]` and 1/0 to `out_found[i]` for each key.
+export fn zcidr_trie_lookup_v4_many(
+    t: ?*Trie,
+    keys: [*]const u32,
+    n: usize,
+    out_values: [*]u64,
+    out_found: [*]u8,
+) c_int {
+    const trie = t orelse return abi.ERR_INVALID;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const k = keys[i];
+        const b = [4]u8{ @truncate(k >> 24), @truncate(k >> 16), @truncate(k >> 8), @truncate(k) };
+        if (trie.lookup(false, &b)) |v| {
+            out_values[i] = v;
+            out_found[i] = 1;
+        } else {
+            out_values[i] = 0;
+            out_found[i] = 0;
+        }
+    }
+    return abi.OK;
+}
+
+/// Batch longest-prefix-match over `n` IPv6 keys (16 network-order bytes each,
+/// packed contiguously in `keys`).
+export fn zcidr_trie_lookup_v6_many(
+    t: ?*Trie,
+    keys: [*]const u8,
+    n: usize,
+    out_values: [*]u64,
+    out_found: [*]u8,
+) c_int {
+    const trie = t orelse return abi.ERR_INVALID;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const key = keys[i * 16 .. i * 16 + 16];
+        if (trie.lookup(true, key)) |v| {
+            out_values[i] = v;
+            out_found[i] = 1;
+        } else {
+            out_values[i] = 0;
+            out_found[i] = 0;
+        }
+    }
+    return abi.OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -211,24 +260,40 @@ test "ipv6 lookup and family isolation" {
 }
 
 test "abi surface" {
-    const t = znet_trie_create() orelse unreachable;
-    defer znet_trie_destroy(t);
+    const t = zcidr_trie_create() orelse unreachable;
+    defer zcidr_trie_destroy(t);
 
-    try testing.expectEqual(abi.OK, znet_trie_insert_cidr(t, "10.0.0.0/8", 10, 7));
+    try testing.expectEqual(abi.OK, zcidr_trie_insert_cidr(t, "10.0.0.0/8", 10, 7));
 
     var out: u64 = 0;
     const addr = v4(10, 20, 30, 40);
-    try testing.expectEqual(abi.OK, znet_trie_lookup(t, 0, &addr, &out));
+    try testing.expectEqual(abi.OK, zcidr_trie_lookup(t, 0, &addr, &out));
     try testing.expectEqual(@as(u64, 7), out);
 
     const miss = v4(11, 0, 0, 0);
-    try testing.expectEqual(abi.ERR_NOTFOUND, znet_trie_lookup(t, 0, &miss, &out));
+    try testing.expectEqual(abi.ERR_NOTFOUND, zcidr_trie_lookup(t, 0, &miss, &out));
 
     // Raw-bytes insert + prefix bound check.
     const p = v4(192, 168, 0, 0);
-    try testing.expectEqual(abi.OK, znet_trie_insert(t, 0, &p, 16, 3));
-    try testing.expectEqual(abi.ERR_INVALID, znet_trie_insert(t, 0, &p, 33, 3));
+    try testing.expectEqual(abi.OK, zcidr_trie_insert(t, 0, &p, 16, 3));
+    try testing.expectEqual(abi.ERR_INVALID, zcidr_trie_insert(t, 0, &p, 33, 3));
     const q = v4(192, 168, 99, 1);
-    try testing.expectEqual(abi.OK, znet_trie_lookup(t, 0, &q, &out));
+    try testing.expectEqual(abi.OK, zcidr_trie_lookup(t, 0, &q, &out));
     try testing.expectEqual(@as(u64, 3), out);
+}
+
+test "batch lookup v4" {
+    const t = zcidr_trie_create() orelse unreachable;
+    defer zcidr_trie_destroy(t);
+    try testing.expectEqual(abi.OK, zcidr_trie_insert_cidr(t, "10.0.0.0/8", 10, 1));
+    try testing.expectEqual(abi.OK, zcidr_trie_insert_cidr(t, "10.1.2.0/24", 11, 3));
+
+    // 10.1.2.5 -> /24 (3), 10.9.9.9 -> /8 (1), 11.0.0.1 -> miss.
+    const keys = [_]u32{ 0x0a010205, 0x0a090909, 0x0b000001 };
+    var vals: [3]u64 = undefined;
+    var found: [3]u8 = undefined;
+    try testing.expectEqual(abi.OK, zcidr_trie_lookup_v4_many(t, &keys, 3, &vals, &found));
+    try testing.expectEqual([3]u8{ 1, 1, 0 }, found);
+    try testing.expectEqual(@as(u64, 3), vals[0]);
+    try testing.expectEqual(@as(u64, 1), vals[1]);
 }

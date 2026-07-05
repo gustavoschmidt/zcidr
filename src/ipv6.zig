@@ -6,6 +6,7 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const ipv4 = @import("ipv4.zig");
+const lines = @import("lines.zig");
 
 pub const ParseError = error{Invalid};
 
@@ -198,21 +199,94 @@ pub fn format(addr: [16]u8, buf: []u8) ParseError![]u8 {
 // ---------------------------------------------------------------------------
 
 /// Parse a textual IPv6 address, writing 16 network-order bytes to `out`.
-export fn znet_ipv6_parse(s: [*]const u8, len: usize, out: *[16]u8) c_int {
+export fn zcidr_ipv6_parse(s: [*]const u8, len: usize, out: *[16]u8) c_int {
     out.* = parse(s[0..len]) catch return abi.ERR_INVALID;
     return abi.OK;
 }
 
 /// Format 16 network-order bytes into `buf` (no NUL). Returns bytes written or
 /// a negative status.
-export fn znet_ipv6_format(in: *const [16]u8, buf: [*]u8, buflen: usize) isize {
+export fn zcidr_ipv6_format(in: *const [16]u8, buf: [*]u8, buflen: usize) isize {
     const written = format(in.*, buf[0..buflen]) catch return abi.ERR_BUFFER;
     return @intCast(written.len);
+}
+
+/// Batch-parse newline-delimited IPv6 addresses. For each record writes 16
+/// network-order bytes to `out_bytes` (16 * record index) and a validity byte
+/// to `out_valid`. `cap` is the record capacity. Returns the record count, or
+/// `ERR_BUFFER` if it exceeds `cap`.
+export fn zcidr_ipv6_parse_lines(
+    data: [*]const u8,
+    len: usize,
+    out_bytes: [*]u8,
+    out_valid: [*]u8,
+    cap: usize,
+) isize {
+    var it = lines.LineIter.init(data[0..len]);
+    var count: usize = 0;
+    while (it.next()) |seg| {
+        if (count >= cap) return abi.ERR_BUFFER;
+        const base = count * 16;
+        if (parse(seg)) |addr| {
+            var k: usize = 0;
+            while (k < 16) : (k += 1) out_bytes[base + k] = addr[k];
+            out_valid[count] = 1;
+        } else |_| {
+            var k: usize = 0;
+            while (k < 16) : (k += 1) out_bytes[base + k] = 0;
+            out_valid[count] = 0;
+        }
+        count += 1;
+    }
+    return @intCast(count);
+}
+
+/// Batch-format `n` addresses (16 network-order bytes each) into `out` as
+/// newline-separated RFC 5952 strings (no trailing newline). Returns bytes
+/// written, or `ERR_BUFFER`.
+export fn zcidr_ipv6_format_lines(bytes_in: [*]const u8, n: usize, out: [*]u8, cap: usize) isize {
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (i != 0) {
+            if (pos >= cap) return abi.ERR_BUFFER;
+            out[pos] = '\n';
+            pos += 1;
+        }
+        var addr: [16]u8 = undefined;
+        var k: usize = 0;
+        while (k < 16) : (k += 1) addr[k] = bytes_in[i * 16 + k];
+        const written = format(addr, out[pos..cap]) catch return abi.ERR_BUFFER;
+        pos += written.len;
+    }
+    return @intCast(pos);
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "batch parse and format lines" {
+    var bytes: [3 * 16]u8 = undefined;
+    var valid: [3]u8 = undefined;
+    const input = "::1\nbad\n2001:db8::1";
+    const n = zcidr_ipv6_parse_lines(input, input.len, &bytes, &valid, 3);
+    try std.testing.expectEqual(@as(isize, 3), n);
+    try std.testing.expectEqual(@as(u8, 1), valid[0]);
+    try std.testing.expectEqual(@as(u8, 0), valid[1]);
+    try std.testing.expectEqual(@as(u8, 1), valid[2]);
+
+    // Round-trip the two valid records (record 1 is zeroed/invalid).
+    var out: [64]u8 = undefined;
+    var pair: [2 * 16]u8 = undefined;
+    var k: usize = 0;
+    while (k < 16) : (k += 1) {
+        pair[k] = bytes[k];
+        pair[16 + k] = bytes[2 * 16 + k];
+    }
+    const m = zcidr_ipv6_format_lines(&pair, 2, &out, out.len);
+    try std.testing.expectEqualStrings("::1\n2001:db8::1", out[0..@intCast(m)]);
+}
 
 fn expectParse(s: []const u8, expected: [16]u8) !void {
     try std.testing.expectEqualSlices(u8, &expected, &(try parse(s)));
@@ -287,12 +361,12 @@ test "format canonical (RFC 5952)" {
 
 test "abi round-trip" {
     var out: [16]u8 = undefined;
-    try std.testing.expectEqual(abi.OK, znet_ipv6_parse("2001:db8::1", 11, &out));
+    try std.testing.expectEqual(abi.OK, zcidr_ipv6_parse("2001:db8::1", 11, &out));
 
     var buf: [max_str_len]u8 = undefined;
-    const n = znet_ipv6_format(&out, &buf, buf.len);
+    const n = zcidr_ipv6_format(&out, &buf, buf.len);
     try std.testing.expect(n > 0);
     try std.testing.expectEqualStrings("2001:db8::1", buf[0..@intCast(n)]);
 
-    try std.testing.expectEqual(abi.ERR_INVALID, znet_ipv6_parse("nope", 4, &out));
+    try std.testing.expectEqual(abi.ERR_INVALID, zcidr_ipv6_parse("nope", 4, &out));
 }

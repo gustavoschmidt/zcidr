@@ -16,14 +16,14 @@ pub fn build(b: *std.Build) void {
 
     // Shared library consumed by the Python (cffi) wrapper over the C ABI.
     const lib = b.addLibrary(.{
-        .name = "znetaddress",
+        .name = "zcidr",
         .root_module = mod,
         .linkage = .dynamic,
     });
     b.installArtifact(lib);
 
     // Also install the public C header alongside the artifact.
-    b.installFile("include/znetaddress.h", "include/znetaddress.h");
+    b.installFile("include/zcidr.h", "include/zcidr.h");
 
     // `zig build test` runs the Zig unit tests.
     const tests = b.addTest(.{ .root_module = mod });
