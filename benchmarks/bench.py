@@ -20,7 +20,7 @@ from time import perf_counter
 # Allow running as a plain script (`python benchmarks/bench.py`) from a checkout.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import zcidr as z  # noqa: E402
+import zcidr  # noqa: E402
 
 try:
     import netaddr
@@ -30,12 +30,13 @@ except ImportError:  # pragma: no cover - optional dependency
     HAVE_NETADDR = False
 
 
-def _rate(fn, workload) -> float:
+def _rate(fn, workload, n=None) -> float:
     """Return operations/second for ``fn`` applied over ``workload``."""
+    n = len(workload) if n is None else n
     t0 = perf_counter()
     fn(workload)
     elapsed = perf_counter() - t0
-    return len(workload) / elapsed if elapsed > 0 else float("inf")
+    return n / elapsed if elapsed > 0 else float("inf")
 
 
 # --- workloads -------------------------------------------------------------
@@ -70,15 +71,13 @@ def bench_ipv4_parse(n=200_000, seed=1):
     data = _ipv4_strings(n, rng)
     blob = "\n".join(data).encode()
     results = {
-        "zcidr (scalar)": _rate(lambda w: [z.parse_ipv4(s) for s in w], data),
+        "zcidr (batch)": _rate(zcidr.parse_ipv4_lines, blob, n=n),
+        "zcidr (scalar)": _rate(lambda w: [zcidr.parse_ipv4(s) for s in w], data),
         "ipaddress": _rate(lambda w: [int(ipaddress.IPv4Address(s)) for s in w], data),
     }
-    t0 = perf_counter()
-    z.parse_ipv4_lines(blob)
-    results["zcidr (batch lines)"] = n / (perf_counter() - t0)
     if HAVE_NETADDR:
         results["netaddr"] = _rate(lambda w: [int(netaddr.IPAddress(s)) for s in w], data)
-    assert z.parse_ipv4(data[0]) == int(ipaddress.IPv4Address(data[0]))
+    assert zcidr.parse_ipv4(data[0]) == int(ipaddress.IPv4Address(data[0]))
     return results
 
 
@@ -87,15 +86,13 @@ def bench_ipv6_parse(n=200_000, seed=2):
     data = _ipv6_strings(n, rng)
     blob = "\n".join(data).encode()
     results = {
-        "zcidr (scalar)": _rate(lambda w: [z.parse_ipv6(s) for s in w], data),
+        "zcidr (batch)": _rate(zcidr.parse_ipv6_lines, blob, n=n),
+        "zcidr (scalar)": _rate(lambda w: [zcidr.parse_ipv6(s) for s in w], data),
         "ipaddress": _rate(lambda w: [ipaddress.IPv6Address(s).packed for s in w], data),
     }
-    t0 = perf_counter()
-    z.parse_ipv6_lines(blob)
-    results["zcidr (batch lines)"] = n / (perf_counter() - t0)
     if HAVE_NETADDR:
         results["netaddr"] = _rate(lambda w: [netaddr.IPAddress(s).packed for s in w], data)
-    assert z.parse_ipv6(data[0]) == ipaddress.IPv6Address(data[0]).packed
+    assert zcidr.parse_ipv6(data[0]) == ipaddress.IPv6Address(data[0]).packed
     return results
 
 
@@ -105,18 +102,16 @@ def bench_membership(k=2_000, m=100_000, seed=3):
     nets = _random_cidrs(k, rng, version=4)
     cidrs = [str(n) for n in nets]
     queries = _ipv4_strings(m, rng)
-
-    matcher = z.build(cidrs)
-
-    def znet_scalar(w):
-        return [z.contains(matcher, ip) for ip in w]
-
-    # batch path: parse once, look up once
     query_blob = "\n".join(queries).encode()
 
-    def znet_batch(_w):
-        keys, _ = z.parse_ipv4_lines(query_blob)
-        _values, found = z.match_ipv4_many(matcher, keys)
+    matcher = zcidr.build(cidrs)
+
+    def z_scalar(w):
+        return [zcidr.contains(matcher, ip) for ip in w]
+
+    def z_fused(_w):
+        # one native pass: parse + longest-prefix-match, straight from text
+        _values, found = zcidr.match_lines(matcher, query_blob)
         return found
 
     py_nets = [ipaddress.ip_network(c) for c in cidrs]
@@ -129,8 +124,8 @@ def bench_membership(k=2_000, m=100_000, seed=3):
         return out
 
     results = {
-        "zcidr (scalar)": _rate(znet_scalar, queries),
-        "zcidr (batch)": _rate(znet_batch, queries),
+        "zcidr (batch, fused)": _rate(z_fused, queries),
+        "zcidr (scalar)": _rate(z_scalar, queries),
     }
     if HAVE_NETADDR:
         na_set = netaddr.IPSet(cidrs)
@@ -144,30 +139,45 @@ def bench_membership(k=2_000, m=100_000, seed=3):
     sample = queries[: min(len(queries), 2_000)]
     results["ipaddress (linear scan)"] = _rate(ipaddress_run, sample)
 
-    # correctness: batch, scalar, and the linear scan agree on the sample
+    # correctness: fused, scalar, and the linear scan agree on the sample
     scan = ipaddress_run(sample)
-    assert znet_scalar(sample) == scan
-    keys, _ = z.parse_ipv4_lines("\n".join(sample))
-    _v, found = z.match_ipv4_many(matcher, keys)
+    assert z_scalar(sample) == scan
+    _v, found = zcidr.match_lines(matcher, sample)
     assert [bool(b) for b in found] == scan
     return results
 
 
+def bench_build(k=200_000, seed=4):
+    """Matcher construction: one native batch insert vs per-CIDR alternatives."""
+    rng = random.Random(seed)
+    cidrs = [str(n) for n in _random_cidrs(k, rng, version=4)]
+    results = {
+        "zcidr build()": _rate(zcidr.build, cidrs),
+        "ipaddress ip_network()": _rate(lambda w: [ipaddress.ip_network(c) for c in w], cidrs),
+    }
+    if HAVE_NETADDR:
+        results["netaddr IPSet()"] = _rate(netaddr.IPSet, cidrs)
+    return results
+
+
 def _print_table(title, results):
-    baseline = results.get("ipaddress") or results.get("ipaddress (linear scan)")
+    baseline = results.get("ipaddress") or results.get("ipaddress (linear scan)") or results.get(
+        "ipaddress ip_network()"
+    )
     print(f"\n{title}")
     print("-" * len(title))
     for impl, rate in sorted(results.items(), key=lambda kv: -kv[1]):
-        speedup = f"{rate / baseline:7.1f}x" if baseline else "   -  "
+        speedup = f"{rate / baseline:9.1f}x" if baseline else "    -    "
         print(f"  {impl:26} {rate:14,.0f} ops/s  {speedup}")
 
 
 def main():
-    print(f"zcidr {z.__version__}  (native core {'.'.join(map(str, z.version()))})")
+    print(f"zcidr {zcidr.__version__}  (native core {'.'.join(map(str, zcidr.version()))})")
     print(f"netaddr available: {HAVE_NETADDR}")
     _print_table("IPv4 parse", bench_ipv4_parse())
     _print_table("IPv6 parse", bench_ipv6_parse())
     _print_table("CIDR membership (longest-prefix / containment)", bench_membership())
+    _print_table("Matcher build (200k CIDR rules)", bench_build())
 
 
 if __name__ == "__main__":

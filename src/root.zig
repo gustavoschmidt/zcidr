@@ -18,7 +18,7 @@ pub const trie = @import("trie.zig");
 /// Semantic version of the library, packed as (major << 16) | (minor << 8) | patch.
 pub const version = struct {
     pub const major: u32 = 0;
-    pub const minor: u32 = 1;
+    pub const minor: u32 = 2;
     pub const patch: u32 = 0;
 };
 
@@ -31,6 +31,7 @@ export fn zcidr_version() u32 {
 // Force the submodules to be analyzed so their `export fn`s are emitted into
 // the shared library (importing a file alone does not pull in its exports).
 comptime {
+    _ = lines;
     _ = ipv4;
     _ = ipv6;
     _ = cidr;
@@ -38,7 +39,7 @@ comptime {
 }
 
 test "zcidr_version packs semver" {
-    try std.testing.expectEqual(@as(u32, 0x000100), zcidr_version());
+    try std.testing.expectEqual(@as(u32, 0x000200), zcidr_version());
 }
 
 // Pull the submodules into the test build so `zig build test` covers them all.

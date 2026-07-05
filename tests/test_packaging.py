@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-import zcidr as z
+import zcidr
 from zcidr import _core
 
 try:
@@ -29,7 +29,7 @@ def test_library_is_discoverable():
 
 
 def test_native_core_loads():
-    assert z.version() == (0, 1, 0)
+    assert zcidr.version() == (0, 2, 0)
 
 
 @pytest.mark.skipif(tomllib is None, reason="tomllib requires Python 3.11+")

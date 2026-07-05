@@ -7,7 +7,7 @@ name = "zcidr"
 version = "0.0.1"
 description = "Fast, functional IP / CIDR toolkit backed by a native Zig core"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "zcidr contributors" }]
 keywords = ["ip", "ipv4", "ipv6", "cidr", "longest-prefix-match", "trie", "zig"]

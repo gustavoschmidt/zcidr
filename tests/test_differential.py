@@ -7,7 +7,7 @@ native results must agree with Python's reference implementation.
 import ipaddress
 import random
 
-import zcidr as z
+import zcidr
 
 SEED = 20260704
 
@@ -17,15 +17,15 @@ def test_ipv4_roundtrip_fuzz():
     for _ in range(5000):
         v = rng.getrandbits(32)
         s = str(ipaddress.IPv4Address(v))
-        assert z.parse_ipv4(s) == v
-        assert z.format_ipv4(v) == s
+        assert zcidr.parse_ipv4(s) == v
+        assert zcidr.format_ipv4(v) == s
 
 
 def test_ipv6_format_fuzz():
     rng = random.Random(SEED + 1)
     for _ in range(5000):
         packed = rng.getrandbits(128).to_bytes(16, "big")
-        assert z.format_ipv6(packed) == str(ipaddress.IPv6Address(packed))
+        assert zcidr.format_ipv6(packed) == str(ipaddress.IPv6Address(packed))
 
 
 def test_ipv6_parse_fuzz():
@@ -33,7 +33,7 @@ def test_ipv6_parse_fuzz():
     for _ in range(5000):
         packed = rng.getrandbits(128).to_bytes(16, "big")
         text = str(ipaddress.IPv6Address(packed))  # canonical form
-        assert z.parse_ipv6(text) == packed
+        assert zcidr.parse_ipv6(text) == packed
 
 
 def _ref_lookup(nets, ip):
@@ -60,11 +60,11 @@ def test_trie_matches_reference_ipv4():
     cidrs = list(nets)
     values = [i + 1 for i in range(len(cidrs))]
     ordered = [(ipaddress.ip_network(c), v) for c, v in zip(cidrs, values)]
-    m = z.build(cidrs, values)
+    m = zcidr.build(cidrs, values)
 
     for _ in range(5000):
         ip = str(ipaddress.IPv4Address(rng.getrandbits(32)))
-        assert z.match(m, ip) == _ref_lookup(ordered, ip)
+        assert zcidr.match(m, ip) == _ref_lookup(ordered, ip)
 
 
 def test_trie_matches_reference_ipv6():
@@ -78,11 +78,11 @@ def test_trie_matches_reference_ipv6():
     cidrs = list(nets)
     values = [i + 1 for i in range(len(cidrs))]
     ordered = [(ipaddress.ip_network(c), v) for c, v in zip(cidrs, values)]
-    m = z.build(cidrs, values)
+    m = zcidr.build(cidrs, values)
 
     for _ in range(3000):
         ip = str(ipaddress.IPv6Address(rng.getrandbits(128)))
-        assert z.match(m, ip) == _ref_lookup(ordered, ip)
+        assert zcidr.match(m, ip) == _ref_lookup(ordered, ip)
 
 
 def test_batch_match_agrees_with_scalar_ipv4():
@@ -95,14 +95,14 @@ def test_batch_match_agrees_with_scalar_ipv4():
         if str(net) not in seen:
             seen.add(str(net))
             cidrs.append(str(net))
-    m = z.build(cidrs)  # default index values
+    m = zcidr.build(cidrs)  # default index values
 
     ips = [str(ipaddress.IPv4Address(rng.getrandbits(32))) for _ in range(4000)]
-    keys, valid = z.parse_ipv4_lines("\n".join(ips))
+    keys, valid = zcidr.parse_ipv4_lines("\n".join(ips))
     assert all(valid)
-    values, found = z.match_ipv4_many(m, keys)
+    values, found = zcidr.match_ipv4_many(m, keys)
     for i, ip in enumerate(ips):
-        scalar = z.match(m, ip)
+        scalar = zcidr.match(m, ip)
         if scalar is None:
             assert found[i] == 0
         else:

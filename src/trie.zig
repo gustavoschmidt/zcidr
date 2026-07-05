@@ -7,6 +7,9 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const cidr = @import("cidr.zig");
+const ipv4 = @import("ipv4.zig");
+const ipv6 = @import("ipv6.zig");
+const lines = @import("lines.zig");
 
 const Node = struct {
     children: [2]?*Node = .{ null, null },
@@ -21,29 +24,24 @@ fn getBit(bytes: []const u8, i: usize) u1 {
 }
 
 pub const Trie = struct {
-    allocator: std.mem.Allocator,
+    /// Nodes are arena-allocated: insertion is a bump allocation (millions of
+    /// tiny nodes per rule set) and destruction frees everything at once.
+    arena: std.heap.ArenaAllocator,
     v4_root: ?*Node = null,
     v6_root: ?*Node = null,
 
-    pub fn init(allocator: std.mem.Allocator) Trie {
-        return .{ .allocator = allocator };
+    pub fn init(child_allocator: std.mem.Allocator) Trie {
+        return .{ .arena = std.heap.ArenaAllocator.init(child_allocator) };
     }
 
     pub fn deinit(self: *Trie) void {
-        if (self.v4_root) |r| self.freeNode(r);
-        if (self.v6_root) |r| self.freeNode(r);
+        self.arena.deinit();
         self.v4_root = null;
         self.v6_root = null;
     }
 
-    fn freeNode(self: *Trie, node: *Node) void {
-        if (node.children[0]) |c| self.freeNode(c);
-        if (node.children[1]) |c| self.freeNode(c);
-        self.allocator.destroy(node);
-    }
-
     fn newNode(self: *Trie) !*Node {
-        const n = try self.allocator.create(Node);
+        const n = try self.arena.allocator().create(Node);
         n.* = .{};
         return n;
     }
@@ -125,6 +123,78 @@ export fn zcidr_trie_insert_cidr(t: ?*Trie, s: [*]const u8, len: usize, value: u
         else => abi.ERR_NOMEM,
     };
     return abi.OK;
+}
+
+/// Batch-insert newline-delimited CIDR strings (mixed families allowed).
+/// Values come from `values[i]` when `values` is non-null, otherwise
+/// `first_value + i` (so chunked callers can keep a running index). Writes 1/0
+/// per record to `out_valid`; invalid records are skipped, valid ones are
+/// inserted. Returns the record count, `ERR_BUFFER` if it exceeds `cap`, or
+/// `ERR_NOMEM` if an allocation failed part-way.
+export fn zcidr_trie_insert_lines(
+    t: ?*Trie,
+    data: [*]const u8,
+    len: usize,
+    values: ?[*]const u64,
+    first_value: u64,
+    out_valid: [*]u8,
+    cap: usize,
+) isize {
+    const trie = t orelse return abi.ERR_INVALID;
+    var it = lines.LineIter.init(data[0..len]);
+    var count: usize = 0;
+    while (it.next()) |seg| {
+        if (count >= cap) return abi.ERR_BUFFER;
+        const value = if (values) |v| v[count] else first_value + count;
+        if (trie.insertCidr(seg, value)) {
+            out_valid[count] = 1;
+        } else |e| switch (e) {
+            error.Invalid => out_valid[count] = 0,
+            else => return abi.ERR_NOMEM,
+        }
+        count += 1;
+    }
+    return @intCast(count);
+}
+
+/// Fused batch parse + longest-prefix-match over newline-delimited IP address
+/// strings; the family of each line is auto-detected (a ':' means IPv6).
+/// Writes the matched value + a found byte (1/0) per record; a record that is
+/// invalid or matches nothing is simply not-found. Returns the record count,
+/// or `ERR_BUFFER` if it exceeds `cap`.
+export fn zcidr_trie_match_lines(
+    t: ?*Trie,
+    data: [*]const u8,
+    len: usize,
+    out_values: [*]u64,
+    out_found: [*]u8,
+    cap: usize,
+) isize {
+    const trie = t orelse return abi.ERR_INVALID;
+    var it = lines.LineIter.init(data[0..len]);
+    var count: usize = 0;
+    while (it.next()) |seg| : (count += 1) {
+        if (count >= cap) return abi.ERR_BUFFER;
+        var hit: ?u64 = null;
+        if (std.mem.indexOfScalar(u8, seg, ':') != null) {
+            if (ipv6.parse(seg)) |bytes| {
+                hit = trie.lookup(true, &bytes);
+            } else |_| {}
+        } else {
+            if (ipv4.parse(seg)) |v| {
+                const b = [4]u8{ @truncate(v >> 24), @truncate(v >> 16), @truncate(v >> 8), @truncate(v) };
+                hit = trie.lookup(false, &b);
+            } else |_| {}
+        }
+        if (hit) |v| {
+            out_values[count] = v;
+            out_found[count] = 1;
+        } else {
+            out_values[count] = 0;
+            out_found[count] = 0;
+        }
+    }
+    return @intCast(count);
 }
 
 /// Longest-prefix-match lookup by raw bytes. On a hit writes the value to
@@ -280,6 +350,55 @@ test "abi surface" {
     const q = v4(192, 168, 99, 1);
     try testing.expectEqual(abi.OK, zcidr_trie_lookup(t, 0, &q, &out));
     try testing.expectEqual(@as(u64, 3), out);
+}
+
+test "batch insert lines" {
+    const t = zcidr_trie_create() orelse unreachable;
+    defer zcidr_trie_destroy(t);
+
+    // Mixed families, one bad record; default values = first_value + index.
+    const data = "10.0.0.0/8\nnot-a-cidr\n2001:db8::/32";
+    var valid: [3]u8 = undefined;
+    const n = zcidr_trie_insert_lines(t, data, data.len, null, 100, &valid, 3);
+    try testing.expectEqual(@as(isize, 3), n);
+    try testing.expectEqual([3]u8{ 1, 0, 1 }, valid);
+
+    var out: u64 = 0;
+    const q4 = v4(10, 1, 1, 1);
+    try testing.expectEqual(abi.OK, zcidr_trie_lookup(t, 0, &q4, &out));
+    try testing.expectEqual(@as(u64, 100), out);
+    const q6 = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    try testing.expectEqual(abi.OK, zcidr_trie_lookup(t, 1, &q6, &out));
+    try testing.expectEqual(@as(u64, 102), out);
+
+    // Explicit values override the index scheme.
+    const vals = [_]u64{7};
+    const one = "192.168.0.0/16";
+    try testing.expectEqual(@as(isize, 1), zcidr_trie_insert_lines(t, one, one.len, &vals, 0, &valid, 3));
+    const q = v4(192, 168, 1, 1);
+    try testing.expectEqual(abi.OK, zcidr_trie_lookup(t, 0, &q, &out));
+    try testing.expectEqual(@as(u64, 7), out);
+
+    // cap too small is an error, not a truncation.
+    try testing.expectEqual(@as(isize, abi.ERR_BUFFER), zcidr_trie_insert_lines(t, data, data.len, null, 0, &valid, 2));
+}
+
+test "fused match lines" {
+    const t = zcidr_trie_create() orelse unreachable;
+    defer zcidr_trie_destroy(t);
+    var valid: [4]u8 = undefined;
+    const rules = "10.0.0.0/8\n10.1.2.0/24\n2001:db8::/32";
+    try testing.expectEqual(@as(isize, 3), zcidr_trie_insert_lines(t, rules, rules.len, null, 0, &valid, 4));
+
+    // v4 hit (most specific), v6 hit, miss, invalid → not-found.
+    const q = "10.1.2.5\n2001:db8::1\n8.8.8.8\ngarbage";
+    var vals: [4]u64 = undefined;
+    var found: [4]u8 = undefined;
+    const n = zcidr_trie_match_lines(t, q, q.len, &vals, &found, 4);
+    try testing.expectEqual(@as(isize, 4), n);
+    try testing.expectEqual([4]u8{ 1, 1, 0, 0 }, found);
+    try testing.expectEqual(@as(u64, 1), vals[0]);
+    try testing.expectEqual(@as(u64, 2), vals[1]);
 }
 
 test "batch lookup v4" {

@@ -26,6 +26,10 @@ extern "C" {
 /* Packed library version: (major << 16) | (minor << 8) | patch. */
 uint32_t zcidr_version(void);
 
+/* Record count for newline-delimited data — the exact number of records the
+ * `*_lines` batch functions will produce (use it to size output buffers). */
+size_t zcidr_line_count(const uint8_t *data, size_t len);
+
 /* ---- IPv4 --------------------------------------------------------------
  * Addresses are host-order uint32 (first octet is the MSB). */
 int zcidr_ipv4_parse(const uint8_t *s, size_t len, uint32_t *out);
@@ -81,6 +85,21 @@ int zcidr_trie_lookup_v4_many(zcidr_trie *t, const uint32_t *keys, size_t n,
                               uint64_t *out_values, uint8_t *out_found);
 int zcidr_trie_lookup_v6_many(zcidr_trie *t, const uint8_t *keys, size_t n,
                               uint64_t *out_values, uint8_t *out_found);
+/* Batch-insert newline-delimited CIDR strings (mixed families). Values come
+ * from values[i] when non-NULL, else first_value + i. Writes 1/0 per record
+ * to out_valid (invalid records are skipped). Returns the record count,
+ * ERR_BUFFER if it exceeds cap, or ERR_NOMEM. */
+intptr_t zcidr_trie_insert_lines(zcidr_trie *t, const uint8_t *data,
+                                 size_t len, const uint64_t *values,
+                                 uint64_t first_value, uint8_t *out_valid,
+                                 size_t cap);
+/* Fused batch parse + LPM over newline-delimited IP strings; the family of
+ * each line is auto-detected. Writes the matched value + a found byte (1/0)
+ * per record; invalid records are simply not-found. Returns the record
+ * count, or ERR_BUFFER. */
+intptr_t zcidr_trie_match_lines(zcidr_trie *t, const uint8_t *data,
+                                size_t len, uint64_t *out_values,
+                                uint8_t *out_found, size_t cap);
 
 #ifdef __cplusplus
 }

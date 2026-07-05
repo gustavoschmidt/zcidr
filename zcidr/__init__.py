@@ -1,31 +1,42 @@
 """zcidr — a fast, functional IP / CIDR toolkit backed by a native Zig core.
 
 The API is deliberately functional: simple values in, simple values out, no
-address objects. Scalar helpers cover one-off use; the ``*_many`` / ``*_lines``
-batch functions cross the native boundary once for a whole workload (buffers in,
-arrays out) and are where the speed lives.
+address objects. Scalar helpers cover one-off use; the batch functions cross
+the native boundary once for a whole workload and are where the speed lives.
 
-Longest-prefix-match uses an opaque *matcher handle* built with :func:`build`;
-free functions (:func:`match`, :func:`contains`, :func:`match_ipv4_many`)
-operate on it. The handle frees its native memory automatically when garbage
-collected, or eagerly via :func:`free`.
+Two batch conventions, by suffix:
+  * ``*_lines`` — the text side. Input is newline-delimited address text:
+    ``str``, any bytes-like buffer (``bytes``, ``mmap``, ``memoryview``, NumPy
+    — zero-copy, no NumPy dependency), or any iterable of strings (a list, a
+    generator, an open text file). Iterables are consumed in bounded chunks,
+    so unbounded streams work; a string that itself contains a newline is an
+    error, never a silent record shift.
+  * ``*_many`` — the binary side. Input is a buffer of fixed-width records:
+    uint32 values for IPv4, packed 16-byte records for IPv6.
 
-Batch conventions:
-  * Inputs accept anything supporting the buffer protocol (``bytes``,
-    ``array.array``, ``memoryview``, NumPy arrays) — zero-copy, no NumPy
-    dependency.
-  * Parse results return ``(values, valid_mask)``; ``valid_mask`` is a ``bytes``
-    of 1/0 per record (invalid records parse to 0 / all-zero). Lookups return
-    ``(values, found_mask)``. This keeps partial failure vectorizable instead of
-    raising mid-batch.
-  * IPv4 values are a ``array('I')`` (uint32); IPv6 addresses are packed 16-byte
-    records in a single ``bytes``; lookup values are ``array('Q')`` (uint64).
+Partial failure is vectorized, not raised: parse results are
+``(values, valid_mask)`` and lookups are ``(values, found_mask)``, where each
+mask is a ``bytes`` of 1/0 per record (invalid records parse to 0 / all-zero).
+IPv4 values are an ``array('I')`` (uint32); IPv6 addresses are packed 16-byte
+records in a single ``bytes``; lookup values are an ``array('Q')`` (uint64).
+
+Longest-prefix-match uses an opaque *matcher* built with :func:`build`; free
+functions (:func:`match`, :func:`contains`, :func:`match_lines`, ``*_many``)
+operate on it. The matcher frees its native memory when garbage collected,
+eagerly via :func:`free`, or scoped as a context manager
+(``with build(...) as m:``).
+
+All native calls release the GIL, so batch calls from multiple threads run
+truly in parallel. The matcher itself is not synchronized: don't insert
+concurrently with lookups (building happens only inside :func:`build`, so any
+fully built matcher is safe to share between threads).
 """
 
 from __future__ import annotations
 
 import weakref
 from array import array
+from itertools import islice
 
 from ._core import ERR_INVALID, ERR_NOTFOUND, OK, ffi, lib
 
@@ -40,25 +51,29 @@ __all__ = [
     "format_ipv6",
     "normalize",
     "is_valid",
-    # batch
+    # batch: text in, binary out
     "parse_ipv4_lines",
-    "parse_ipv4_many",
-    "format_ipv4_many",
     "parse_ipv6_lines",
-    "parse_ipv6_many",
-    "format_ipv6_many",
+    # batch: binary in, text out
+    "format_ipv4_lines",
+    "format_ipv6_lines",
     # longest-prefix-match
     "build",
     "free",
     "match",
     "contains",
+    "match_lines",
     "match_ipv4_many",
     "match_ipv6_many",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-_U64_MAX = 0xFFFFFFFFFFFFFFFF
+# Iterables of strings are consumed in chunks of this many lines: large enough
+# to amortize the native call, small enough to bound memory on huge streams.
+_CHUNK_LINES = 1 << 16
+
+_SENTINEL = object()
 
 
 class AddressError(ValueError):
@@ -78,15 +93,38 @@ def _encode(s: str) -> bytes:
         raise AddressError(f"invalid address: {s!r}") from exc
 
 
-def _as_bytes(data) -> bytes:
+def _text_chunks(data):
+    """Yield ``(src, nbytes, nrecords, items)`` chunks of newline-joined text.
+
+    ``data`` is a str / bytes-like blob (one zero-copy chunk, ``items`` is
+    None) or an iterable of strings (bounded chunks; ``items`` is the chunk's
+    list, kept for error reporting). ``src`` is safe to pass as ``uint8_t *``.
+    """
     if isinstance(data, str):
-        return _encode(data)
-    return bytes(data) if not isinstance(data, (bytes, bytearray)) else data
+        data = data.encode("utf-8")  # non-ASCII lines become invalid records
+    try:
+        src = data if isinstance(data, bytes) else ffi.from_buffer(data)
+    except TypeError:
+        pass  # not a buffer: treat as an iterable of strings below
+    else:
+        nbytes = len(src)
+        yield src, nbytes, lib.zcidr_line_count(src, nbytes), None
+        return
+    it = iter(data)
+    while True:
+        items = list(islice(it, _CHUNK_LINES))
+        if not items:
+            return
+        blob = "".join(s if s.endswith("\n") else s + "\n" for s in items).encode("utf-8")
+        n = lib.zcidr_line_count(blob, len(blob))
+        if n != len(items):
+            raise ValueError("input strings must not contain interior newlines")
+        yield blob, len(blob), n, items
 
 
 def _to_array(typecode: str, cdata, nbytes: int) -> array:
     a = array(typecode)
-    a.frombytes(bytes(ffi.buffer(cdata, nbytes)))
+    a.frombytes(ffi.buffer(cdata, nbytes))
     return a
 
 
@@ -108,7 +146,7 @@ def format_ipv4(value: int) -> str:
         raise AddressError(f"IPv4 value out of range: {value}")
     buf = ffi.new("uint8_t[16]")
     n = lib.zcidr_ipv4_format(value, buf, len(buf))
-    if n < 0:
+    if n < 0:  # pragma: no cover - buffer is always large enough
         raise AddressError(f"could not format IPv4 value: {value}")
     return bytes(ffi.buffer(buf, n)).decode("ascii")
 
@@ -129,7 +167,7 @@ def format_ipv6(packed: bytes) -> str:
     src = ffi.new("uint8_t[16]", list(packed))
     buf = ffi.new("uint8_t[46]")
     n = lib.zcidr_ipv6_format(src, buf, len(buf))
-    if n < 0:
+    if n < 0:  # pragma: no cover - buffer is always large enough
         raise AddressError("could not format IPv6 bytes")
     return bytes(ffi.buffer(buf, n)).decode("ascii")
 
@@ -154,36 +192,61 @@ def is_valid(s: str) -> bool:
 
 
 def parse_ipv4_lines(data) -> tuple[array, bytes]:
-    """Parse newline-delimited IPv4 addresses (``str`` or ``bytes``).
+    """Parse IPv4 addresses in bulk: one native call per workload.
 
-    Returns ``(values: array('I'), valid_mask: bytes)`` with one entry per line
-    (a trailing newline is ignored; CRLF is handled).
+    ``data`` is newline-delimited text (``str`` or any bytes-like buffer,
+    zero-copy) or any iterable of address strings (list, generator, open text
+    file). Returns ``(values: array('I'), valid_mask: bytes)`` with one entry
+    per record; CRLF and a trailing newline are handled.
     """
-    data = _as_bytes(data)
-    if not data:
-        return array("I"), b""
-    cap = data.count(b"\n") + 1
-    out_v = ffi.new("uint32_t[]", cap)
-    out_m = ffi.new("uint8_t[]", cap)
-    n = lib.zcidr_ipv4_parse_lines(data, len(data), out_v, out_m, cap)
-    if n < 0:  # pragma: no cover - cap is a safe upper bound
-        raise RuntimeError("zcidr_ipv4_parse_lines overflowed its buffer")
-    return _to_array("I", out_v, 4 * n), bytes(ffi.buffer(out_m, n))
+    values = array("I")
+    mask = bytearray()
+    for src, nbytes, nrec, _items in _text_chunks(data):
+        if nrec == 0:
+            continue
+        out_v = ffi.new("uint32_t[]", nrec)
+        out_m = ffi.new("uint8_t[]", nrec)
+        n = lib.zcidr_ipv4_parse_lines(src, nbytes, out_v, out_m, nrec)
+        if n < 0:  # pragma: no cover - nrec is the exact record count
+            raise RuntimeError("zcidr_ipv4_parse_lines overflowed its buffer")
+        values.frombytes(ffi.buffer(out_v, 4 * n))
+        mask += ffi.buffer(out_m, n)
+    return values, bytes(mask)
 
 
-def parse_ipv4_many(addrs) -> tuple[array, bytes]:
-    """Like :func:`parse_ipv4_lines` but over an iterable of address strings."""
-    return parse_ipv4_lines("\n".join(addrs))
+def parse_ipv6_lines(data) -> tuple[bytes, bytes]:
+    """Parse IPv6 addresses in bulk (same inputs as :func:`parse_ipv4_lines`).
 
-
-def format_ipv4_many(values) -> bytes:
-    """Format a buffer of uint32 values as newline-separated dotted-decimal.
-
-    ``values`` is any uint32 buffer (``array('I')``, NumPy ``uint32``, or raw
-    ``bytes`` whose length is a multiple of 4). Returns ``bytes`` (no trailing
-    newline).
+    Returns ``(packed: bytes, valid_mask: bytes)`` where ``packed`` holds 16
+    network-order bytes per record contiguously.
     """
-    src = ffi.from_buffer(values)
+    packed = bytearray()
+    mask = bytearray()
+    for src, nbytes, nrec, _items in _text_chunks(data):
+        if nrec == 0:
+            continue
+        out_b = ffi.new("uint8_t[]", nrec * 16)
+        out_m = ffi.new("uint8_t[]", nrec)
+        n = lib.zcidr_ipv6_parse_lines(src, nbytes, out_b, out_m, nrec)
+        if n < 0:  # pragma: no cover - nrec is the exact record count
+            raise RuntimeError("zcidr_ipv6_parse_lines overflowed its buffer")
+        packed += ffi.buffer(out_b, n * 16)
+        mask += ffi.buffer(out_m, n)
+    return bytes(packed), bytes(mask)
+
+
+def format_ipv4_lines(values) -> bytes:
+    """Format uint32 IPv4 values as newline-separated dotted-decimal ``bytes``.
+
+    ``values`` is any uint32 buffer (``array('I')``, NumPy ``uint32``, raw
+    ``bytes`` whose length is a multiple of 4) or an iterable of ints. No
+    trailing newline.
+    """
+    try:
+        src = ffi.from_buffer(values)
+    except TypeError:
+        values = array("I", values)
+        src = ffi.from_buffer(values)
     nbytes = len(src)
     if nbytes % 4:
         raise ValueError("values buffer length must be a multiple of 4 bytes")
@@ -199,36 +262,17 @@ def format_ipv4_many(values) -> bytes:
     return bytes(ffi.buffer(out, total))
 
 
-def parse_ipv6_lines(data) -> tuple[bytes, bytes]:
-    """Parse newline-delimited IPv6 addresses.
+def format_ipv6_lines(packed) -> bytes:
+    """Format packed 16-byte IPv6 records as newline-separated ``bytes``.
 
-    Returns ``(packed: bytes, valid_mask: bytes)`` where ``packed`` holds 16
-    network-order bytes per record contiguously.
+    ``packed`` is any buffer whose length is a multiple of 16, or an iterable
+    of 16-byte ``bytes``. No trailing newline.
     """
-    data = _as_bytes(data)
-    if not data:
-        return b"", b""
-    cap = data.count(b"\n") + 1
-    out_b = ffi.new("uint8_t[]", cap * 16)
-    out_m = ffi.new("uint8_t[]", cap)
-    n = lib.zcidr_ipv6_parse_lines(data, len(data), out_b, out_m, cap)
-    if n < 0:  # pragma: no cover
-        raise RuntimeError("zcidr_ipv6_parse_lines overflowed its buffer")
-    return bytes(ffi.buffer(out_b, n * 16)), bytes(ffi.buffer(out_m, n))
-
-
-def parse_ipv6_many(addrs) -> tuple[bytes, bytes]:
-    """Like :func:`parse_ipv6_lines` but over an iterable of address strings."""
-    return parse_ipv6_lines("\n".join(addrs))
-
-
-def format_ipv6_many(packed) -> bytes:
-    """Format a buffer of packed 16-byte records as newline-separated strings.
-
-    ``packed`` is any buffer whose length is a multiple of 16. Returns ``bytes``
-    (no trailing newline).
-    """
-    src = ffi.from_buffer(packed)
+    try:
+        src = ffi.from_buffer(packed)
+    except TypeError:
+        packed = b"".join(packed)
+        src = ffi.from_buffer(packed)
     nbytes = len(src)
     if nbytes % 16:
         raise ValueError("packed buffer length must be a multiple of 16 bytes")
@@ -247,8 +291,9 @@ def format_ipv6_many(packed) -> bytes:
 # --- longest-prefix-match --------------------------------------------------
 
 
-class _Handle:
-    """Opaque matcher handle. Frees its native trie on GC or via free()."""
+class _Matcher:
+    """Opaque matcher handle. Frees its native trie on GC, free(), or exit
+    from a ``with`` block."""
 
     __slots__ = ("_ptr", "_finalizer", "__weakref__")
 
@@ -256,56 +301,109 @@ class _Handle:
         self._ptr = ptr
         self._finalizer = weakref.finalize(self, lib.zcidr_trie_destroy, ptr)
 
+    def __enter__(self) -> "_Matcher":
+        return self
 
-def _ptr(handle: _Handle):
-    fin = getattr(handle, "_finalizer", None)
+    def __exit__(self, *exc) -> None:
+        self._finalizer()
+
+
+def _ptr(matcher: _Matcher):
+    fin = getattr(matcher, "_finalizer", None)
     if fin is None or not fin.alive:
-        raise ValueError("matcher handle has been freed")
-    return handle._ptr
+        raise ValueError("matcher has been freed")
+    return matcher._ptr
 
 
-def _insert(ptr, cidr: str, value: int) -> None:
-    if not 0 <= value <= _U64_MAX:
-        raise ValueError(f"value out of uint64 range: {value}")
-    data = _encode(cidr)
-    rc = lib.zcidr_trie_insert_cidr(ptr, data, len(data), value)
-    if rc == ERR_INVALID:
-        raise AddressError(f"invalid CIDR: {cidr!r}")
-    if rc != OK:  # pragma: no cover
-        raise MemoryError("could not insert into trie")
+def _bad_record(src, nbytes, items, i) -> str:
+    """Recover record ``i`` of a chunk for an error message (slow path)."""
+    if items is not None:
+        return repr(items[i])
+    blob = src if isinstance(src, bytes) else bytes(ffi.buffer(src, nbytes))
+    return repr(blob.split(b"\n")[i].rstrip(b"\r").decode("utf-8", "replace"))
 
 
-def build(cidrs, values=None) -> _Handle:
+def build(cidrs, values=None) -> _Matcher:
     """Build a longest-prefix-match matcher from CIDR networks.
 
-    ``cidrs`` is an iterable of strings (``"10.0.0.0/8"``, ``"2001:db8::/32"``).
-    ``values`` is an optional parallel iterable of uint64 values returned on a
-    match; if omitted, each network's value is its index in ``cidrs``. Returns an
-    opaque handle for :func:`match` / :func:`contains` / the ``*_many`` lookups.
+    ``cidrs`` takes the same inputs as :func:`parse_ipv4_lines` — newline-
+    delimited text (str or bytes-like buffer) or any iterable of strings —
+    and families can be mixed (``"10.0.0.0/8"``, ``"2001:db8::/32"``; a bare
+    address is a host route). Insertion is one native call per workload.
+
+    ``values`` optionally assigns each network the uint64 returned on a
+    match: a uint64 buffer (``array('Q')``, NumPy ``uint64``) or an iterable
+    of ints, with exactly one value per network. If omitted, each network's
+    value is its index in ``cidrs``.
+
+    An invalid CIDR raises :class:`AddressError` naming the record — rule
+    sets are curated inputs, unlike bulk address logs. The result works with
+    :func:`match` / :func:`contains` / :func:`match_lines` / the ``*_many``
+    lookups, and can be used as a context manager.
     """
-    ptr = lib.zcidr_trie_create()
-    if ptr == ffi.NULL:
-        raise MemoryError("could not allocate trie")
-    handle = _Handle(ptr)  # owns the trie; frees it if we raise below
     if values is None:
-        for i, cidr in enumerate(cidrs):
-            _insert(ptr, cidr, i)
+        vptr, viter, nvals = None, None, 0
     else:
-        for cidr, value in zip(cidrs, values):
-            _insert(ptr, cidr, value)
-    return handle
+        try:
+            vbuf = ffi.from_buffer(values)
+        except TypeError:
+            vptr, viter = None, iter(values)
+        else:
+            if len(vbuf) % 8:
+                raise ValueError("values buffer length must be a multiple of 8 bytes")
+            vptr, viter, nvals = ffi.cast("uint64_t *", vbuf), None, len(vbuf) // 8
+
+    ptr = lib.zcidr_trie_create()
+    if ptr == ffi.NULL:  # pragma: no cover
+        raise MemoryError("could not allocate trie")
+    matcher = _Matcher(ptr)  # owns the trie; frees it if we raise below
+
+    total = 0
+    for src, nbytes, nrec, items in _text_chunks(cidrs):
+        if nrec == 0:
+            continue
+        if vptr is not None:
+            if total + nrec > nvals:
+                raise ValueError("fewer values than cidrs")
+            chunk_values = vptr + total
+        elif viter is not None:
+            try:
+                chunk = array("Q", islice(viter, nrec))
+            except OverflowError as exc:
+                raise ValueError(f"value out of uint64 range: {exc}") from exc
+            if len(chunk) != nrec:
+                raise ValueError("fewer values than cidrs")
+            chunk_values = ffi.cast("uint64_t *", ffi.from_buffer(chunk))
+        else:
+            chunk_values = ffi.NULL
+        out_valid = ffi.new("uint8_t[]", nrec)
+        n = lib.zcidr_trie_insert_lines(ptr, src, nbytes, chunk_values, total, out_valid, nrec)
+        if n < 0:  # pragma: no cover
+            raise MemoryError("could not insert into trie")
+        bad = bytes(ffi.buffer(out_valid, n)).find(0)
+        if bad != -1:
+            raise AddressError(
+                f"invalid CIDR at index {total + bad}: {_bad_record(src, nbytes, items, bad)}"
+            )
+        total += n
+
+    if values is not None:
+        leftover = (nvals > total) if vptr is not None else next(viter, _SENTINEL) is not _SENTINEL
+        if leftover:
+            raise ValueError("more values than cidrs")
+    return matcher
 
 
-def free(handle: _Handle) -> None:
+def free(matcher: _Matcher) -> None:
     """Eagerly release a matcher's native memory. Idempotent."""
-    fin = getattr(handle, "_finalizer", None)
+    fin = getattr(matcher, "_finalizer", None)
     if fin is not None:
         fin()
 
 
-def match(handle: _Handle, ip: str):
+def match(matcher: _Matcher, ip: str):
     """Return the value of the longest prefix matching ``ip``, or ``None``."""
-    ptr = _ptr(handle)
+    ptr = _ptr(matcher)
     if ":" in ip:
         addr = parse_ipv6(ip)
         is_v6 = 1
@@ -318,21 +416,46 @@ def match(handle: _Handle, ip: str):
         return int(out[0])
     if rc == ERR_NOTFOUND:
         return None
-    raise AddressError(f"invalid address: {ip!r}")
+    raise AddressError(f"invalid address: {ip!r}")  # pragma: no cover
 
 
-def contains(handle: _Handle, ip: str) -> bool:
+def contains(matcher: _Matcher, ip: str) -> bool:
     """Return True if any network in the matcher contains ``ip``."""
-    return match(handle, ip) is not None
+    return match(matcher, ip) is not None
 
 
-def match_ipv4_many(handle: _Handle, keys) -> tuple[array, bytes]:
+def match_lines(matcher: _Matcher, data) -> tuple[array, bytes]:
+    """Fused batch parse + longest-prefix-match over IP address text.
+
+    ``data`` takes the same inputs as :func:`parse_ipv4_lines`, and IPv4/IPv6
+    lines can be mixed — each record's family is auto-detected. One native
+    pass parses and matches; nothing intermediate is materialized. Returns
+    ``(values: array('Q'), found_mask: bytes)``; a record that is invalid or
+    matches no network is simply not-found.
+    """
+    ptr = _ptr(matcher)
+    values = array("Q")
+    found = bytearray()
+    for src, nbytes, nrec, _items in _text_chunks(data):
+        if nrec == 0:
+            continue
+        out_v = ffi.new("uint64_t[]", nrec)
+        out_f = ffi.new("uint8_t[]", nrec)
+        n = lib.zcidr_trie_match_lines(ptr, src, nbytes, out_v, out_f, nrec)
+        if n < 0:  # pragma: no cover - nrec is the exact record count
+            raise RuntimeError("zcidr_trie_match_lines overflowed its buffer")
+        values.frombytes(ffi.buffer(out_v, 8 * n))
+        found += ffi.buffer(out_f, n)
+    return values, bytes(found)
+
+
+def match_ipv4_many(matcher: _Matcher, keys) -> tuple[array, bytes]:
     """Batch longest-prefix-match over a uint32 IPv4 key buffer.
 
     ``keys`` is any uint32 buffer (e.g. the ``values`` from
     :func:`parse_ipv4_lines`). Returns ``(values: array('Q'), found_mask: bytes)``.
     """
-    ptr = _ptr(handle)
+    ptr = _ptr(matcher)
     src = ffi.from_buffer(keys)
     nbytes = len(src)
     if nbytes % 4:
@@ -347,13 +470,14 @@ def match_ipv4_many(handle: _Handle, keys) -> tuple[array, bytes]:
     return _to_array("Q", out_v, 8 * n), bytes(ffi.buffer(out_f, n))
 
 
-def match_ipv6_many(handle: _Handle, keys) -> tuple[array, bytes]:
+def match_ipv6_many(matcher: _Matcher, keys) -> tuple[array, bytes]:
     """Batch longest-prefix-match over packed 16-byte IPv6 keys.
 
-    ``keys`` is any buffer of packed 16-byte records (e.g. the ``packed`` output
-    of :func:`parse_ipv6_lines`). Returns ``(values: array('Q'), found_mask: bytes)``.
+    ``keys`` is any buffer of packed 16-byte records (e.g. the ``packed``
+    output of :func:`parse_ipv6_lines`). Returns
+    ``(values: array('Q'), found_mask: bytes)``.
     """
-    ptr = _ptr(handle)
+    ptr = _ptr(matcher)
     src = ffi.from_buffer(keys)
     nbytes = len(src)
     if nbytes % 16:

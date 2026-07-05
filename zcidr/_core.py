@@ -16,6 +16,7 @@ from cffi import FFI
 # Keep this in sync with include/zcidr.h.
 _CDEF = """
 uint32_t zcidr_version(void);
+size_t zcidr_line_count(const uint8_t *data, size_t len);
 
 int zcidr_ipv4_parse(const uint8_t *s, size_t len, uint32_t *out);
 intptr_t zcidr_ipv4_format(uint32_t addr, uint8_t *buf, size_t buflen);
@@ -49,6 +50,13 @@ int zcidr_trie_lookup_v4_many(zcidr_trie *t, const uint32_t *keys, size_t n,
                               uint64_t *out_values, uint8_t *out_found);
 int zcidr_trie_lookup_v6_many(zcidr_trie *t, const uint8_t *keys, size_t n,
                               uint64_t *out_values, uint8_t *out_found);
+intptr_t zcidr_trie_insert_lines(zcidr_trie *t, const uint8_t *data,
+                                 size_t len, const uint64_t *values,
+                                 uint64_t first_value, uint8_t *out_valid,
+                                 size_t cap);
+intptr_t zcidr_trie_match_lines(zcidr_trie *t, const uint8_t *data,
+                                size_t len, uint64_t *out_values,
+                                uint8_t *out_found, size_t cap);
 """
 
 # Status codes (mirror src/abi.zig).

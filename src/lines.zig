@@ -33,11 +33,43 @@ pub const LineIter = struct {
     }
 };
 
+/// Number of records `LineIter` will yield for `data`. Lets callers size
+/// output buffers exactly before a batch call.
+pub fn count(data: []const u8) usize {
+    if (data.len == 0) return 0;
+    var n: usize = 1;
+    for (data[0 .. data.len - 1]) |c| {
+        if (c == '\n') n += 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// C ABI
+// ---------------------------------------------------------------------------
+
+/// Record count for newline-delimited `data` (the exact number of records the
+/// `*_lines` batch functions will produce).
+export fn zcidr_line_count(data: [*]const u8, len: usize) usize {
+    return count(data[0..len]);
+}
+
 fn collect(data: []const u8, buf: [][]const u8) usize {
     var it = LineIter.init(data);
     var n: usize = 0;
     while (it.next()) |seg| : (n += 1) buf[n] = seg;
     return n;
+}
+
+test "count matches iteration" {
+    const cases = [_][]const u8{ "", "a", "a\n", "a\nb", "a\nb\n", "a\n\nb", "\n", "a\r\nb\r\n" };
+    for (cases) |data| {
+        var it = LineIter.init(data);
+        var n: usize = 0;
+        while (it.next()) |_| n += 1;
+        try std.testing.expectEqual(n, count(data));
+        try std.testing.expectEqual(n, zcidr_line_count(data.ptr, data.len));
+    }
 }
 
 test "line splitting semantics" {
