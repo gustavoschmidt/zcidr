@@ -14,16 +14,21 @@ jobs:
       matrix:
         # ubuntu-24.04-arm provides native linux/aarch64 wheels; the linux
         # cibuildwheel config builds only the runner's native arch.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The Zig toolchain is supplied by the `ziglang` build requirement, so no
       # separate compiler setup is needed in the cibuildwheel containers.
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21
+        env:
+          # Match the minimum target cibuildwheel enforces on modern macOS
+          # runners, silencing the automatic 10.13 -> 11.0 bump. Ignored on
+          # non-macOS runners.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.os }}
           path: ./wheelhouse/*.whl
@@ -31,12 +36,12 @@ jobs:
   build_sdist:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pipx run build --sdist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: sdist
           path: ./dist/*.tar.gz
@@ -50,7 +55,7 @@ jobs:
     permissions:
       id-token: write # required for PyPI Trusted Publishing
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
