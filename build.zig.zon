@@ -1,6 +1,6 @@
 .{
     .name = .zcidr,
-    .version = "0.0.1",
+    .version = "0.0.2",
     .fingerprint = 0xa44f19825c1096ed,
     .minimum_zig_version = "0.16.0",
     .paths = .{
