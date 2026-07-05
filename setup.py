@@ -9,6 +9,7 @@ The native toolchain is provided by the ``ziglang`` build requirement; a system
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,39 @@ def _lib_name() -> str:
     raise RuntimeError(f"unsupported platform: {sys.platform}")
 
 
+def _lib_subdir() -> str:
+    # Zig installs a dynamic library's loadable file into `bin/` on Windows
+    # (only the import `.lib` lands in `lib/`); every other platform gets the
+    # shared object in `lib/`.
+    if sys.platform in ("win32", "cygwin"):
+        return "bin"
+    return "lib"
+
+
+def _macos_zig_target() -> str:
+    """Map cibuildwheel's per-arch ``ARCHFLAGS`` to a Zig target triple.
+
+    cibuildwheel builds each macOS arch as a separate single-arch wheel and
+    selects the arch via ``ARCHFLAGS`` (e.g. ``-arch x86_64``). The native
+    build must match that arch or ``delocate`` rejects the wheel, so we cross
+    compile when the requested arch differs from the runner's.
+
+    The triple also pins a minimum OS version, otherwise Zig stamps the binary
+    with the build host's macOS version (e.g. 26.0) and the wheel gets tagged
+    for that release only. The minimum tracks cibuildwheel's per-arch default
+    ``MACOSX_DEPLOYMENT_TARGET`` (10.13 for x86_64, 11.0 for arm64) so the
+    binary and the wheel platform tag agree.
+    """
+    arches = re.findall(r"-arch\s+(\S+)", os.environ.get("ARCHFLAGS", ""))
+    if len(arches) != 1:
+        return ""  # native build (universal2 is not supported here)
+    triple = {
+        "x86_64": "x86_64-macos.10.13",
+        "arm64": "aarch64-macos.11.0",
+    }
+    return triple.get(arches[0], "")
+
+
 def _zig_cmd() -> list:
     """Prefer the hermetic ``ziglang`` wheel; fall back to a system ``zig``."""
     try:
@@ -51,6 +85,9 @@ class BuildZig(build_py):
     def run(self) -> None:
         cmd = _zig_cmd() + ["build", "-Doptimize=ReleaseFast"]
         target = os.environ.get("ZCIDR_ZIG_TARGET")
+        if not target and sys.platform == "darwin":
+            # Match the arch cibuildwheel is currently building (x86_64/arm64).
+            target = _macos_zig_target()
         if target:  # e.g. cross-building manylinux: x86_64-linux-gnu.2.17
             cmd.append(f"-Dtarget={target}")
         print("zcidr: building native core:", " ".join(cmd))
@@ -59,7 +96,7 @@ class BuildZig(build_py):
         super().run()  # copies the .py sources into build_lib
 
         lib = _lib_name()
-        src = os.path.join(ROOT, "zig-out", "lib", lib)
+        src = os.path.join(ROOT, "zig-out", _lib_subdir(), lib)
         if not os.path.isfile(src):
             raise RuntimeError(f"expected built library not found: {src}")
         dest_dir = os.path.join(self.build_lib, "zcidr")

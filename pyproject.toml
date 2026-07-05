@@ -58,6 +58,10 @@ archs = ["auto64"]
 
 [tool.cibuildwheel.macos]
 archs = ["x86_64", "arm64"]
+# Pin a low deployment target so wheels install on older macOS. setup.py builds
+# the Zig core with a matching minimum (arm64 is auto-bumped to 11.0, the
+# oldest macOS with Apple Silicon), keeping the binary and wheel tag in sync.
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.13" }
 
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]
